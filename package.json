@@ -1,18 +1,13 @@
 {
   "publisher": "vicky1428",
   "name": "bhai",
-  "displayName": "bhi",
-  "description": "",
+  "displayName": "Bhai",
+  "description": "Plays a sound on every keypress while you type in VS Code.",
   "version": "0.0.1",
   "engines": {
-    "vscode": "^1.107.0"
+    "vscode": "^1.107.0"  
   },
   "icon": "logo.png",
-  "files": [
-    "out",
-    "audio.mp3",
-    "logo.png"
-  ],
   "categories": [
     "Other"
   ],
