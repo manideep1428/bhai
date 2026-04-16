@@ -1,39 +1,65 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
-import * as fs from 'fs';
+import { spawn, ChildProcess } from 'child_process';
 
-let panel: vscode.WebviewPanel | undefined;
+
+let psProcess: ChildProcess | undefined;
+let ready = false;
+
+function startPowerShellPlayer(audioPath: string) {
+	// Escape backslashes for PowerShell string
+	const escapedPath = audioPath.replace(/\\/g, '\\\\');
+
+	// Spawn a single PowerShell process that stays alive
+	// -NonInteractive + reading from stdin keeps it resident
+	psProcess = spawn('powershell.exe', [
+		'-NoProfile',
+		'-NonInteractive',
+		'-ExecutionPolicy', 'Bypass',
+		'-Command', '-'
+	], {
+		stdio: ['pipe', 'pipe', 'pipe'],
+		windowsHide: true,
+	});
+
+	psProcess.on('error', () => { psProcess = undefined; ready = false; });
+	psProcess.on('exit', () => { psProcess = undefined; ready = false; });
+
+	// Pre-load WMP COM object and the audio file into memory
+	// After this runs, playing is instant — no disk I/O, no startup delay
+	const initScript = `
+Add-Type -AssemblyName presentationCore
+$global:mp = New-Object System.Windows.Media.MediaPlayer
+$global:mp.Open([uri]'${escapedPath}')
+$global:mp.Volume = 1
+Start-Sleep -Milliseconds 500
+Write-Host 'READY'
+`;
+
+	psProcess.stdin!.write(initScript);
+
+	// Wait for READY signal before accepting play commands
+	psProcess.stdout!.on('data', (data: Buffer) => {
+		if (data.toString().includes('READY')) {
+			ready = true;
+		}
+	});
+}
+
+function playSound() {
+	if (!psProcess || !ready) { return; }
+
+	// Stop + seek to start + play — all in one line, no new process
+	// MediaPlayer plays instantly since audio is already loaded in memory
+	psProcess.stdin!.write(`$global:mp.Stop(); $global:mp.Position = [TimeSpan]::Zero; $global:mp.Play()\n`);
+}
 
 export function activate(context: vscode.ExtensionContext) {
 	const audioPath = path.join(context.extensionPath, 'audio.mp3');
 
-	// Read the audio file as base64 once — the webview will decode it into
-	// an AudioBuffer so every subsequent play is instant (no process spawn).
-	const audioBase64 = fs.readFileSync(audioPath).toString('base64');
+	console.log('bhai extension active — keep-alive PowerShell MediaPlayer');
 
-	// Hidden webview — the user never sees it, it just runs the Web Audio API
-	panel = vscode.window.createWebviewPanel(
-		'bhaiAudio',
-		'bhai audio',
-		{ viewColumn: vscode.ViewColumn.One, preserveFocus: true },
-		{
-			enableScripts: true,
-			retainContextWhenHidden: true,
-		}
-	);
-
-	// Move the webview out of sight immediately
-	// (VS Code doesn't allow truly hidden panels, but we can keep focus on the editor)
-	vscode.commands.executeCommand('workbench.action.focusActiveEditorGroup');
-
-	panel.webview.html = getWebviewHtml(audioBase64);
-
-	// Trigger a play by posting a message to the webview
-	const playSound = () => {
-		panel?.webview.postMessage({ command: 'play' });
-	};
-
-	console.log('bhai extension active — using Web Audio API for zero-latency sound');
+	startPowerShellPlayer(audioPath);
 
 	const listener = vscode.workspace.onDidChangeTextDocument((event) => {
 		for (const change of event.contentChanges) {
@@ -52,61 +78,17 @@ export function activate(context: vscode.ExtensionContext) {
 	context.subscriptions.push(listener);
 	context.subscriptions.push({
 		dispose: () => {
-			panel?.dispose();
-			panel = undefined;
+			psProcess?.stdin?.end();
+			psProcess?.kill();
+			psProcess = undefined;
+			ready = false;
 		}
 	});
-}
-
-function getWebviewHtml(audioBase64: string): string {
-	return `<!DOCTYPE html>
-<html lang="en">
-<head><meta charset="UTF-8"><title>bhai audio</title></head>
-<body>
-<script>
-(async () => {
-	const ctx = new AudioContext();
-
-	// Decode MP3 once from the embedded base64 data
-	const b64 = "${audioBase64}";
-	const binary = atob(b64);
-	const bytes = new Uint8Array(binary.length);
-	for (let i = 0; i < binary.length; i++) { bytes[i] = binary.charCodeAt(i); }
-
-	let buffer;
-	try {
-		buffer = await ctx.decodeAudioData(bytes.buffer);
-	} catch(e) {
-		console.error('bhai: failed to decode audio', e);
-		return;
-	}
-
-	// Listen for play commands from the extension
-	window.addEventListener('message', (event) => {
-		if (event.data?.command !== 'play') { return; }
-
-		// Resume AudioContext if suspended (browser autoplay policy)
-		const play = () => {
-			const source = ctx.createBufferSource();
-			source.buffer = buffer;
-			source.connect(ctx.destination);
-			source.start(0);
-		};
-
-		if (ctx.state === 'suspended') {
-			ctx.resume().then(play);
-		} else {
-			play();
-		}
-	});
-})();
-</script>
-</body>
-</html>`;
 }
 
 export function deactivate() {
-	panel?.dispose();
-	panel = undefined;
+	psProcess?.stdin?.end();
+	psProcess?.kill();
+	psProcess = undefined;
+	ready = false;
 }
-
